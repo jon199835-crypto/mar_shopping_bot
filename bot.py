@@ -672,14 +672,14 @@ async def voice_handler(message: Message):
 
     await message.answer(f"🎤 Вы сказали: *{text}*", parse_mode="Markdown")
 
-    # --- сначала пробуем как артикул ---
+    # --- Пытаемся найти артикул ---
     article_query, qty = parse_article_and_qty(text)
     product = get_product_by_article(article_query)
 
     if product:
         return await send_product_card(message, product)
 
-    # --- если артикул не найден — ищем по названию ---
+    # --- Ищем по названию ---
     results = search_products_by_name(text)
 
     if not results:
@@ -690,11 +690,12 @@ async def voice_handler(message: Message):
         return await send_product_card(message, results[0])
 
     await message.answer(
-        f"🔎 Найдено {len(results)} позиций: показываю первые 10:",
+        f"🔎 Найдено {len(results)} позиций, показываю первые 10:",
         parse_mode="Markdown"
     )
 
     for p in results[:10]:
+        
         await send_product_card(message, p)
 # -------------------------------------------
 # ОБРАБОТКА EXCEL
