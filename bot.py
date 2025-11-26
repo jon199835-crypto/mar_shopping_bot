@@ -65,8 +65,9 @@ from reportlab.pdfbase.ttfonts import TTFont
 # user_id -> { article -> { name, price_opt(int), qty(int) } }
 USER_CARTS: Dict[int, Dict[str, Dict[str, Any]]] = {}
 
-# user_id -> {"article": str, "value": str}
-PENDING_QTY_INPUT: Dict[int, Dict[str, str]] = {}
+# временное хранение ввода количества через numpad:
+# user_id -> {"article": str, "qty": str}
+QTY_INPUT: Dict[int, Dict[str, str]] = {}
 
 # article -> file_id (фото в телеге, чтобы слать мгновенно)
 PHOTO_CACHE: Dict[str, str] = {}
@@ -89,10 +90,7 @@ MAIN_MENU = ReplyKeyboardMarkup(
     resize_keyboard=True,
 )
 
-# -------------------------------------------
 # ЧИСЛОВАЯ КЛАВИАТУРА (NUMPAD)
-# -------------------------------------------
-
 NUMPAD = InlineKeyboardMarkup(
     inline_keyboard=[
         [
@@ -117,6 +115,7 @@ NUMPAD = InlineKeyboardMarkup(
         ],
     ]
 )
+
 # -------------------------------------------
 # ЗАГРУЗКА JSON С GitHub
 # -------------------------------------------
@@ -195,18 +194,11 @@ def get_all_models() -> List[str]:
 # -------------------------------------------
 
 def parse_price_to_int(val: Any) -> int:
-    """
-    Превращаем '34 042' или 34042 → 34042 (int).
-    """
     s = str(val).replace(" ", "").replace("\xa0", "")
     return int(s) if s.isdigit() else 0
 
 
 def resolve_real_url(url: str) -> str:
-    """
-    Раскручиваем редиректы (Ozon/WB/CDN) до конечного URL.
-    Если не вышло — возвращаем исходный.
-    """
     try:
         r = requests.get(url, allow_redirects=True, timeout=7)
         return r.url
@@ -225,17 +217,14 @@ def parse_article_and_qty(text: str):
     s = text.strip()
     low = s.lower().replace("х", "x")
 
-    # артикул x 3 или * 3
     m = re.match(r"^(.+?)\s*[x\*]\s*(\d+)$", low)
     if m:
         return m.group(1).strip(), int(m.group(2))
 
-    # артикул 3 (через пробел)
     m2 = re.match(r"^(.+)\s+(\d+)$", s)
     if m2:
         return m2.group(1).strip(), int(m2.group(2))
 
-    # только артикул
     return s, None
 
 
@@ -244,10 +233,6 @@ def parse_article_and_qty(text: str):
 # -------------------------------------------
 
 async def send_product_card(message: Message, product: Dict[str, Any]) -> None:
-    """
-    Карточка товара — фото отправляется как документ,
-    миниатюра 200x120, не растягивается Telegram’ом.
-    """
     article = str(product.get("article", "")).strip()
     name = str(product.get("name", article))
     opt_price_str = str(product.get("opt_price", "0"))
@@ -289,7 +274,7 @@ async def send_product_card(message: Message, product: Dict[str, Any]) -> None:
         ]
     )
 
-    # Если фото уже есть в кэше — отправляем мгновенно
+    # фото из кэша
     if article in PHOTO_CACHE:
         file_id = PHOTO_CACHE[article]
         try:
@@ -314,7 +299,6 @@ async def send_product_card(message: Message, product: Dict[str, Any]) -> None:
             await message.answer(caption, parse_mode="Markdown", reply_markup=kb)
             return
 
-        # Создаём миниатюру 200x120
         thumb_bytes = None
         if PILImage is not None:
             try:
@@ -329,7 +313,6 @@ async def send_product_card(message: Message, product: Dict[str, Any]) -> None:
 
         img_bytes.seek(0)
 
-        # Отправляем как документ с миниатюрой
         sent = await message.answer_document(
             document=BufferedInputFile(
                 img_bytes.getvalue(), filename=f"{article}.jpg"
@@ -346,13 +329,10 @@ async def send_product_card(message: Message, product: Dict[str, Any]) -> None:
             reply_markup=kb,
         )
 
-        # Сохраняем file_id
         if sent.document:
             PHOTO_CACHE[article] = sent.document.file_id
-
         return
 
-    # Если нет фото вовсе
     await message.answer(caption, parse_mode="Markdown", reply_markup=kb)
 
 
@@ -361,19 +341,12 @@ async def send_product_card(message: Message, product: Dict[str, Any]) -> None:
 # -------------------------------------------
 
 async def send_cart(message_or_cb_msg: Message, user_id: int, edit: bool = False) -> None:
-    """
-    Корзина:
-    — Каждый товар отдельным сообщением с кнопками +/-.
-    — Отдельное финальное сообщение с итогом и кнопками.
-    """
     cart = USER_CARTS.get(user_id, {})
 
     if not cart:
         await message_or_cb_msg.answer("🧺 Корзина пуста.")
         return
 
-    # Если вызываем из callback и хотим "обновить" — удалим одно старое сообщение,
-    # новое состояние корзины появится ниже.
     if edit:
         try:
             await message_or_cb_msg.delete()
@@ -382,7 +355,6 @@ async def send_cart(message_or_cb_msg: Message, user_id: int, edit: bool = False
 
     total = 0
 
-    # 1️⃣ Товары по одному
     for article, item in cart.items():
         qty = item["qty"]
         price = item["price_opt"]
@@ -411,7 +383,6 @@ async def send_cart(message_or_cb_msg: Message, user_id: int, edit: bool = False
 
         await message_or_cb_msg.answer(text, parse_mode="Markdown", reply_markup=kb)
 
-    # 2️⃣ Финальный блок с итогом + кнопки очистки/оформления
     total_text = f"💰 *Итого: {total} ₽*"
 
     kb_total = InlineKeyboardMarkup(
@@ -435,13 +406,9 @@ async def send_cart(message_or_cb_msg: Message, user_id: int, edit: bool = False
 
 
 def add_to_cart(user_id: int, product: Dict[str, Any], qty: int) -> bool:
-    """
-    Возвращает True — успешно, False — превышение наличия.
-    """
     if qty <= 0:
         return False
 
-    # наличие
     stock_raw = product.get("stock", 0)
     try:
         stock = int(stock_raw)
@@ -473,7 +440,6 @@ def add_to_cart(user_id: int, product: Dict[str, Any], qty: int) -> bool:
 
 
 def change_cart_qty(user_id: int, article: str, delta: int) -> None:
-    """Меняем количество товара в корзине на delta."""
     if user_id not in USER_CARTS:
         return
     if article not in USER_CARTS[user_id]:
@@ -489,37 +455,28 @@ def change_cart_qty(user_id: int, article: str, delta: int) -> None:
 # -------------------------------------------
 
 async def send_model_page(message: Message, model: str, page: int):
-    """
-    Показывает одну страницу товаров по выбранной модели.
-    """
     products = get_products_by_model(model)
     if not products:
         await message.answer("❌ Для этой модели запчастей не найдено.")
         return
 
     total = len(products)
-    pages = (total + PAGE_SIZE - 1) // PAGE_SIZE  # всего страниц
+    pages = (total + PAGE_SIZE - 1) // PAGE_SIZE
 
-    if page < 1:
-        page = 1
-    if page > pages:
-        page = pages
+    page = max(1, min(page, pages))
 
     start = (page - 1) * PAGE_SIZE
     end = start + PAGE_SIZE
     page_products = products[start:end]
 
-    # заголовок страницы
     await message.answer(
         f"📂 Запчасти для *{model}* (стр. {page}/{pages}):",
         parse_mode="Markdown",
     )
 
-    # товары
     for p in page_products:
         await send_product_card(message, p)
 
-    # навигация по страницам
     if pages > 1:
         buttons = []
         if page > 1:
@@ -551,7 +508,6 @@ dp = Dispatcher()
 async def cmd_start(message: Message):
     user_id = message.from_user.id
 
-    # Первый вход — показываем приветствие
     if user_id not in FIRST_VISIT:
         FIRST_VISIT.add(user_id)
 
@@ -565,12 +521,11 @@ async def cmd_start(message: Message):
         )
         return
 
-    # Повторный вход — просто показываем меню
     await message.answer("Вы снова в боте 😊\nВыберите действие:", reply_markup=MAIN_MENU)
 
 
 # -------------------------------------------
-# ГЛАВНОЕ МЕНЮ — ОБРАБОТЧИКИ КНОПОК
+# ГЛАВНОЕ МЕНЮ
 # -------------------------------------------
 
 @dp.message(F.text == "🔎 Найти артикул")
@@ -588,7 +543,6 @@ async def btn_cart(message: Message):
 
 @dp.message(F.text == "📄 Оформить заказ")
 async def btn_checkout(message: Message):
-    # делаем фейковый callback, чтобы переиспользовать логику checkout
     fake_callback = type(
         "obj", (object,), {"from_user": message.from_user, "message": message}
     )
@@ -656,19 +610,13 @@ async def btn_upload_excel(message: Message):
 
 @dp.message(F.document)
 async def handle_excel_upload(message: Message):
-    """
-    Обработка Excel-файла:
-    Поддерживаем .xlsx, парсим артикул + количество, добавляем в корзину.
-    """
     user_id = message.from_user.id
     file = message.document
 
-    # Проверяем расширение
     if not file.file_name.lower().endswith(".xlsx"):
         await message.answer("Пожалуйста, отправьте файл Excel в формате .xlsx")
         return
 
-    # Скачиваем файл
     file_bytes = await bot.download(file)
     file_bytes.seek(0)
 
@@ -682,7 +630,6 @@ async def handle_excel_upload(message: Message):
     added = 0
     errors = []
 
-    # Ищем колонки
     header_map = {}
     first_row = [str(c.value).strip().lower() if c.value else "" for c in ws[1]]
 
@@ -692,27 +639,21 @@ async def handle_excel_upload(message: Message):
         if "кол" in title:
             header_map["qty"] = idx
 
-    # Если шапки нет — предполагаем A=Артикул, B=Кол-во
     if not header_map:
         header_map = {"article": 0, "qty": 1}
 
-    # Обрабатываем строки
     for row in ws.iter_rows(min_row=2, values_only=True):
         if not row or not row[header_map["article"]]:
             continue
 
         raw_article = row[header_map["article"]]
 
-        # Если Excel записал артикул как число (84300.0 или 84300)
         if isinstance(raw_article, (int, float)):
             raw_article = str(raw_article).rstrip(".0")
 
-        # Превращаем в строку
         article = str(raw_article).strip()
-
         qty_raw = row[header_map["qty"]]
 
-        # Количество
         try:
             qty = int(qty_raw)
             if qty <= 0:
@@ -721,13 +662,11 @@ async def handle_excel_upload(message: Message):
             errors.append(f"{article} — неверное количество")
             continue
 
-        # Ищем товар в базе
         product = get_product_by_article(article)
         if not product:
             errors.append(f"{article} — товар не найден")
             continue
 
-        # Пытаемся добавить
         ok = add_to_cart(user_id, product, qty)
         if not ok:
             stock_raw = product.get("stock", 0)
@@ -740,7 +679,6 @@ async def handle_excel_upload(message: Message):
 
         added += 1
 
-    # Вывод результатов
     msg = f"📥 Загрузка Excel завершена!\n\n"
     msg += f"✅ Добавлено позиций: *{added}*\n"
 
@@ -754,53 +692,14 @@ async def handle_excel_upload(message: Message):
 
 
 # -------------------------------------------
-# ОБЩИЙ ОБРАБОТЧИК СООБЩЕНИЙ (ПОИСК / КОЛ-ВО)
+# ОБРАБОТЧИК СООБЩЕНИЙ (ПОИСК)
 # -------------------------------------------
 
 @dp.message()
 async def handle_message(message: Message):
-    user_id = message.from_user.id
     text = message.text.strip()
+    user_id = message.from_user.id
 
-    # 1) если ждём ручной ввод количества
-    if user_id in PENDING_QTY:
-        article = PENDING_QTY[user_id]
-        try:
-            qty = int(text)
-            if qty <= 0:
-                await message.answer("Количество должно быть больше нуля.")
-                return
-        except ValueError:
-            await message.answer("Введите, пожалуйста, целое число, например: 5")
-            return
-
-        product = get_product_by_article(article)
-        if not product:
-            await message.answer("Не смог найти товар, попробуйте ещё раз.")
-            del PENDING_QTY[user_id]
-            return
-
-        ok = add_to_cart(user_id, product, qty)
-        if not ok:
-            stock_raw = product.get("stock", 0)
-            try:
-                stock = int(stock_raw)
-            except Exception:
-                stock = 0
-            await message.answer(f"❗ Доступно только {stock} шт")
-            return
-
-        del PENDING_QTY[user_id]
-
-        await message.answer(
-            f"✅ Добавлено {qty} шт товара *{product['name']}* "
-            f"(арт. `{product['article']}`) в корзину.",
-            parse_mode="Markdown",
-        )
-        await send_cart(message, user_id)
-        return
-
-    # 2) обычное сообщение → парсим артикул и количество
     article_query, qty = parse_article_and_qty(text)
     product = get_product_by_article(article_query)
 
@@ -808,7 +707,6 @@ async def handle_message(message: Message):
         await message.answer("❌ Артикул не найден.")
         return
 
-    # если количество указано → сразу в корзину
     if qty is not None:
         if qty <= 0:
             await message.answer("Количество должно быть больше нуля.")
@@ -832,36 +730,31 @@ async def handle_message(message: Message):
         await send_cart(message, user_id)
         return
 
-    # иначе просто показываем карточку товара
     await send_product_card(message, product)
+
 
 # -------------------------------------------
 # NUMPAD — ВВОД КОЛИЧЕСТВА
 # -------------------------------------------
 
-# временное хранение: user_id -> {"article": "...", "qty": "12"}
-QTY_INPUT = {}
-
-
 @dp.callback_query(F.data.startswith("add_manual_"))
 async def cb_manual_qty(callback: CallbackQuery):
-    """Пользователь нажал '✏️ Ввести количество' — показываем numpad"""
+    """Нажата кнопка '✏️ Ввести количество' — показываем numpad."""
     user_id = callback.from_user.id
     article = callback.data.replace("add_manual_", "")
 
     QTY_INPUT[user_id] = {"article": article, "qty": ""}
 
     await callback.message.answer(
-        f"Введите количество для `{article}`:",
+        f"Введите количество для `{article}`:\nТекущее: *пусто*",
         reply_markup=NUMPAD,
-        parse_mode="Markdown"
+        parse_mode="Markdown",
     )
     await callback.answer()
 
 
 @dp.callback_query(F.data.startswith("qty_digit_"))
 async def cb_numpad(callback: CallbackQuery):
-    """Пользователь нажал цифру / backspace / OK"""
     user_id = callback.from_user.id
 
     if user_id not in QTY_INPUT:
@@ -870,33 +763,22 @@ async def cb_numpad(callback: CallbackQuery):
 
     action = callback.data.replace("qty_digit_", "")
     current = QTY_INPUT[user_id]["qty"]
+    article = QTY_INPUT[user_id]["article"]
 
-    # цифры
     if action.isdigit():
-        if len(current) < 4:            # ограничение 4 цифры, чтобы не было 99999
+        if len(current) < 4:
             QTY_INPUT[user_id]["qty"] += action
 
-        await callback.answer()
-        await callback.message.edit_reply_markup(reply_markup=NUMPAD)
-        return
-
-    # backspace
-    if action == "back":
+    elif action == "back":
         QTY_INPUT[user_id]["qty"] = current[:-1]
-        await callback.answer()
-        await callback.message.edit_reply_markup(reply_markup=NUMPAD)
-        return
 
-    # OK — подтверждение
-    if action == "ok":
+    elif action == "ok":
         qty_text = QTY_INPUT[user_id]["qty"]
-
         if qty_text == "":
             await callback.answer("Введите количество!", show_alert=True)
             return
 
         qty = int(qty_text)
-        article = QTY_INPUT[user_id]["article"]
         product = get_product_by_article(article)
 
         if not product:
@@ -912,14 +794,29 @@ async def cb_numpad(callback: CallbackQuery):
         del QTY_INPUT[user_id]
 
         await callback.message.answer(
-            f"Добавлено {qty} шт товара *{product['name']}* (`{article}`)",
-            parse_mode="Markdown"
+            f"✅ Добавлено {qty} шт товара *{product['name']}* (`{article}`)",
+            parse_mode="Markdown",
         )
-
         await send_cart(callback.message, user_id)
         await callback.answer()
+        return
+
+    # обновляем текст с текущим значением
+    new_val = QTY_INPUT[user_id]["qty"] or "пусто"
+    try:
+        await callback.message.edit_text(
+            f"Введите количество для `{article}`:\nТекущее: *{new_val}*",
+            reply_markup=NUMPAD,
+            parse_mode="Markdown",
+        )
+    except Exception:
+        pass
+
+    await callback.answer()
+
+
 # -------------------------------------------
-# CALLBACK: ОТКРЫТЬ КОРЗИНУ
+# CALLBACK: ОТКРЫТЬ / ОЧИСТИТЬ КОРЗИНУ
 # -------------------------------------------
 
 @dp.callback_query(F.data == "open_cart")
@@ -927,10 +824,6 @@ async def cb_open_cart(callback: CallbackQuery):
     await callback.answer()
     await send_cart(callback.message, callback.from_user.id)
 
-
-# -------------------------------------------
-# CALLBACK: ОЧИСТИТЬ КОРЗИНУ
-# -------------------------------------------
 
 @dp.callback_query(F.data == "cart_clear")
 async def cb_cart_clear(callback: CallbackQuery):
@@ -942,30 +835,13 @@ async def cb_cart_clear(callback: CallbackQuery):
 
 # -------------------------------------------
 # CALLBACK: БЫСТРЫЕ КНОПКИ ДОБАВЛЕНИЯ (+1,+2,+5,+10)
-# add_1_ARTICLE  / add_2_ARTICLE / add_5_... / add_10_...
-# add_manual_ARTICLE
 # -------------------------------------------
 
-@dp.callback_query(F.data.startswith("add_"))
-async def cb_add(callback: CallbackQuery):
+@dp.callback_query(F.data.regexp(r"^add_(\d+)_"))
+async def cb_add_quick(callback: CallbackQuery):
     user_id = callback.from_user.id
-    data = callback.data  # пример: add_1_12345 или add_manual_12345
+    data = callback.data  # add_5_ARTICLE
 
-    # --- Ручной ввод количества ---
-    if data.startswith("add_manual_"):
-    article = data.replace("add_manual_", "")
-    PENDING_QTY_INPUT[user_id] = {"article": article, "value": ""}
-    
-    await callback.message.answer(
-        f"Введите количество для `{article}`:\n\n"
-        f"*Текущее значение:* (пусто)",
-        parse_mode="Markdown",
-        reply_markup=numpad_keyboard(article, "")
-    )
-    await callback.answer()
-    return
-
-    # --- Быстрые кнопки ---
     m = re.match(r"^add_(\d+)_(.+)$", data)
     if not m:
         await callback.answer("Ошибка формата.", show_alert=True)
@@ -974,13 +850,11 @@ async def cb_add(callback: CallbackQuery):
     qty = int(m.group(1))
     article = m.group(2)
 
-    # Ищем товар
     product = get_product_by_article(article)
     if not product:
         await callback.answer("Товар не найден.", show_alert=True)
         return
 
-    # Добавляем в корзину
     ok = add_to_cart(user_id, product, qty)
     if not ok:
         stock_raw = product.get("stock", 0)
@@ -1010,7 +884,6 @@ async def cb_show_model_parts(callback: CallbackQuery):
 @dp.callback_query(F.data.startswith("modelpage_"))
 async def cb_model_page(callback: CallbackQuery):
     data = callback.data
-    # формат: modelpage_<page>_<model>
     _, page_str, model = data.split("_", 2)
 
     try:
@@ -1030,7 +903,6 @@ async def cb_model_page(callback: CallbackQuery):
 
 # -------------------------------------------
 # CALLBACK: ПЛЮС / МИНУС В КОРЗИНЕ
-# cart_plus_ARTICLE / cart_minus_ARTICLE
 # -------------------------------------------
 
 @dp.callback_query(F.data.startswith("cart_plus_"))
@@ -1083,13 +955,10 @@ async def checkout_handler(callback: CallbackQuery):
         await callback.answer("Корзина пуста!", show_alert=True)
         return
 
-    # ---- Регистрируем кириллические шрифты ----
     pdfmetrics.registerFont(TTFont("DejaVu", "DejaVuSans.ttf"))
     pdfmetrics.registerFont(TTFont("DejaVu-Bold", "DejaVuSans-Bold.ttf"))
 
     styles = getSampleStyleSheet()
-
-    # Правим все базовые стили
     for s in styles.byName:
         styles[s].fontName = "DejaVu"
 
@@ -1097,8 +966,6 @@ async def checkout_handler(callback: CallbackQuery):
     doc = SimpleDocTemplate(buffer, pagesize=A4, title="Заказ Моторешение")
 
     elems = []
-
-    # Заголовок
     elems.append(Paragraph("<b>Заказ Моторешение</b>", styles["Title"]))
     elems.append(Spacer(1, 12))
 
@@ -1112,10 +979,7 @@ async def checkout_handler(callback: CallbackQuery):
     elems.append(Paragraph(f"Клиент: @{user_label}", styles["Normal"]))
     elems.append(Spacer(1, 20))
 
-    # ------------------ Таблица ------------------
-    table_data = [
-        ["Фото", "Артикул", "Название", "Кол-во", "Цена", "Сумма"]
-    ]
+    table_data = [["Фото", "Артикул", "Название", "Кол-во", "Цена", "Сумма"]]
 
     total_sum = 0
 
@@ -1129,7 +993,6 @@ async def checkout_handler(callback: CallbackQuery):
         product = get_product_by_article(article)
         photo_url = product["photo_url"] if product else ""
 
-        # ---- Фото 50x50 ----
         if photo_url and str(photo_url).startswith("http"):
             try:
                 resp = requests.get(photo_url, timeout=5)
@@ -1140,10 +1003,8 @@ async def checkout_handler(callback: CallbackQuery):
         else:
             img_obj = Paragraph("Нет фото", styles["Normal"])
 
-        # ---- Название с переносами ----
         name_paragraph = Paragraph(name, styles["Normal"])
 
-        # ---- Добавляем строку ----
         table_data.append(
             [
                 img_obj,
@@ -1155,7 +1016,6 @@ async def checkout_handler(callback: CallbackQuery):
             ]
         )
 
-    # Создаём таблицу (как раньше)
     table = Table(table_data, colWidths=[60, 55, 180, 50, 55, 60])
 
     table.setStyle(
@@ -1175,27 +1035,21 @@ async def checkout_handler(callback: CallbackQuery):
 
     elems.append(table)
     elems.append(Spacer(1, 20))
-    elems.append(
-        Paragraph(f"<b>Итого: {total_sum} ₽</b>", styles["Heading2"])
-    )
+    elems.append(Paragraph(f"<b>Итого: {total_sum} ₽</b>", styles["Heading2"]))
 
-    # Сгенерировать PDF
     doc.build(elems)
 
     buffer.seek(0)
     pdf_bytes = buffer.getvalue()
 
-    # Один и тот же контент в двух объектах для клиента и админа
     file_for_user = BufferedInputFile(pdf_bytes, filename="Заказ Моторешение.pdf")
     file_for_admin = BufferedInputFile(pdf_bytes, filename="Заказ Моторешение.pdf")
 
-    # 1) Отправляем клиенту
     await callback.message.answer_document(
         document=file_for_user,
         caption="📄 Ваш заказ сформирован!",
     )
 
-    # 2) Отправляем админу
     await bot.send_document(
         ADMIN_ID,
         document=file_for_admin,
