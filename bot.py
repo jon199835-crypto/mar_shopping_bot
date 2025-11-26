@@ -658,7 +658,9 @@ async def voice_handler(message: Message):
     from pydub import AudioSegment
     audio = AudioSegment.from_file(io.BytesIO(ogg_bytes), format="ogg")
     wav_bytes = audio.export(format="wav").read()
-text = recognize_speech_vosk(wav_bytes)
+
+    # Распознаём
+    text = recognize_speech_vosk(wav_bytes)
 
     if not text:
         await message.answer("Не расслышал 🙈 Попробуйте ещё раз.")
@@ -689,7 +691,6 @@ text = recognize_speech_vosk(wav_bytes)
     )
 
     for p in results[:10]:
-        
         await send_product_card(message, p)
 # -------------------------------------------
 # ОБРАБОТКА EXCEL
