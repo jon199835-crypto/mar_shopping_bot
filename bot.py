@@ -175,7 +175,28 @@ def load_db() -> List[Dict[str, Any]]:
 
     return DB_CACHE
 
+def search_products_by_name(query: str) -> List[Dict[str, Any]]:
+    """
+    Ищет товары по части названия (регистр неважен).
+    """
+    db = load_db()
+    q = query.lower().strip()
 
+    results = []
+    for p in db:
+        name = str(p.get("name", "")).lower()
+        article = str(p.get("article", "")).lower()
+
+        # игнорируем модели и мусор
+        if not name:
+            continue
+
+        # ищем по вхождению
+        if q in name:
+            results.append(p)
+
+    return results
+    
 def get_product_by_article(article_query: str) -> Optional[Dict[str, Any]]:
     """
     Находим товар по артикулу (регистронезависимо, без лишних пробелов).
@@ -651,15 +672,30 @@ async def voice_handler(message: Message):
 
     await message.answer(f"🎤 Вы сказали: *{text}*", parse_mode="Markdown")
 
-    # Пытаемся интерпретировать как запрос артикула
+    # --- сначала пробуем как артикул ---
     article_query, qty = parse_article_and_qty(text)
     product = get_product_by_article(article_query)
 
-    if not product:
-        await message.answer("❌ Артикул не найден.")
+    if product:
+        return await send_product_card(message, product)
+
+    # --- если артикул не найден — ищем по названию ---
+    results = search_products_by_name(text)
+
+    if not results:
+        await message.answer("❌ Ничего не найдено по вашему запросу.")
         return
 
-    await send_product_card(message, product)
+    if len(results) == 1:
+        return await send_product_card(message, results[0])
+
+    await message.answer(
+        f"🔎 Найдено {len(results)} позиций: показываю первые 10:",
+        parse_mode="Markdown"
+    )
+
+    for p in results[:10]:
+        await send_product_card(message, p)
 # -------------------------------------------
 # ОБРАБОТКА EXCEL
 # -------------------------------------------
@@ -756,37 +792,45 @@ async def handle_message(message: Message):
     text = message.text.strip()
     user_id = message.from_user.id
 
+    # --- сначала попытка распознать как артикул ---
     article_query, qty = parse_article_and_qty(text)
     product = get_product_by_article(article_query)
 
-    if not product:
-        await message.answer("❌ Артикул не найден.")
-        return
+    if product:  # нашли артикул
+        if qty:
+            ok = add_to_cart(user_id, product, qty)
+            if not ok:
+                stock = int(product.get("stock", 0))
+                await message.answer(f"❗ Доступно только {stock} шт")
+                return
 
-    if qty is not None:
-        if qty <= 0:
-            await message.answer("Количество должно быть больше нуля.")
+            await message.answer(
+                f"✅ Добавлено {qty} шт *{product['name']}* (арт. `{product['article']}`)",
+                parse_mode="Markdown"
+            )
+            await send_cart(message, user_id)
             return
 
-        ok = add_to_cart(user_id, product, qty)
-        if not ok:
-            stock_raw = product.get("stock", 0)
-            try:
-                stock = int(stock_raw)
-            except Exception:
-                stock = 0
-            await message.answer(f"❗ Доступно только {stock} шт")
-            return
+        return await send_product_card(message, product)
 
-        await message.answer(
-            f"✅ Добавлено {qty} шт *{product['name']}* "
-            f"(арт. `{product['article']}`) в корзину.",
-            parse_mode="Markdown",
-        )
-        await send_cart(message, user_id)
+    # --- если артикул не найден → ищем по названию ---
+    results = search_products_by_name(text)
+
+    if not results:
+        await message.answer("❌ Ничего не найдено по вашему запросу.")
         return
 
-    await send_product_card(message, product)
+    # Если одна позиция — показываем карточку
+    if len(results) == 1:
+        await send_product_card(message, results[0])
+        return
+
+    # Если много — выдаём первые 10
+    msg = f"🔎 Найдено {len(results)} позиций по запросу: *{text}*\nПоказываю первые 10:"
+    await message.answer(msg, parse_mode="Markdown")
+
+    for p in results[:10]:
+        await send_product_card(message, p)
 
 
 # -------------------------------------------
