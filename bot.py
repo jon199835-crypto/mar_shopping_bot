@@ -6,7 +6,8 @@ import time
 import json
 import requests
 from typing import Dict, Any, Optional, List
-
+from vosk import Model, KaldiRecognizer
+import wave
 # -------------------------------------------
 # НАСТРОЙКИ
 # -------------------------------------------
@@ -119,7 +120,32 @@ NUMPAD = InlineKeyboardMarkup(
 # -------------------------------------------
 # ЗАГРУЗКА JSON С GitHub
 # -------------------------------------------
+def recognize_speech_vosk(wav_io):
+    wav_io.seek(0)
 
+    # записываем в temp wav, потому что wave.open требует файл
+    with open("temp_voice.wav", "wb") as f:
+        f.write(wav_io.read())
+
+    wf = wave.open("temp_voice.wav", "rb")
+
+    model = Model("model")
+    rec = KaldiRecognizer(model, wf.getframerate())
+
+    text = ""
+
+    while True:
+        data = wf.readframes(4000)
+        if len(data) == 0:
+            break
+        if rec.AcceptWaveform(data):
+            part = json.loads(rec.Result())
+            text += part.get("text", "") + " "
+
+    part = json.loads(rec.FinalResult())
+    text += part.get("text", "")
+
+    return text.strip()
 def load_db() -> List[Dict[str, Any]]:
     """
     Кэшируем products.json на 60 секунд.
@@ -603,7 +629,37 @@ async def btn_upload_excel(message: Message):
         parse_mode="Markdown",
     )
 
+@dp.message(F.voice)
+async def voice_handler(message: Message):
+    # Скачиваем ogg-голос
+    voice_file = await bot.download(message.voice.file_id)
+    ogg_bytes = voice_file.read()
 
+    # Конвертируем ogg → wav
+    from pydub import AudioSegment
+    audio = AudioSegment.from_file(io.BytesIO(ogg_bytes), format="ogg")
+    wav_io = io.BytesIO()
+    audio.export(wav_io, format="wav")
+    wav_io.seek(0)
+
+    # Распознаём
+    text = recognize_speech_vosk(wav_io)
+
+    if not text:
+        await message.answer("Не расслышал 🙈 Попробуйте ещё раз.")
+        return
+
+    await message.answer(f"🎤 Вы сказали: *{text}*", parse_mode="Markdown")
+
+    # Пытаемся интерпретировать как запрос артикула
+    article_query, qty = parse_article_and_qty(text)
+    product = get_product_by_article(article_query)
+
+    if not product:
+        await message.answer("❌ Артикул не найден.")
+        return
+
+    await send_product_card(message, product)
 # -------------------------------------------
 # ОБРАБОТКА EXCEL
 # -------------------------------------------
