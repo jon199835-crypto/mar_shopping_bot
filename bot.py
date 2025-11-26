@@ -765,15 +765,19 @@ async def cb_numpad(callback: CallbackQuery):
     current = QTY_INPUT[user_id]["qty"]
     article = QTY_INPUT[user_id]["article"]
 
+    # --- ЦИФРЫ ---
     if action.isdigit():
-        if len(current) < 4:
+        if len(current) < 4:  # ограничение длины
             QTY_INPUT[user_id]["qty"] += action
 
+    # --- СТЕРЕТЬ ---
     elif action == "back":
         QTY_INPUT[user_id]["qty"] = current[:-1]
 
+    # --- OK ---
     elif action == "ok":
         qty_text = QTY_INPUT[user_id]["qty"]
+
         if qty_text == "":
             await callback.answer("Введите количество!", show_alert=True)
             return
@@ -783,14 +787,24 @@ async def cb_numpad(callback: CallbackQuery):
 
         if not product:
             await callback.answer("Товар не найден.", show_alert=True)
-            del QTY_INPUT[user_id]
-            return
+            return   # ❗ не удаляем QTY_INPUT — позволяем ввести заново
 
+        # --- ПРОВЕРКА НАЛИЧИЯ ---
         if not add_to_cart(user_id, product, qty):
-            await callback.answer("Недостаточно на складе!", show_alert=True)
-            del QTY_INPUT[user_id]
-            return
+            stock_raw = product.get("stock", 0)
+            try:
+                stock = int(stock_raw)
+            except:
+                stock = 0
 
+            await callback.answer(
+                f"Недостаточно на складе! Доступно: {stock}",
+                show_alert=True
+            )
+
+            return  # ❗ не удаляем QTY_INPUT → numpad остаётся активным
+
+        # --- УСПЕХ ---
         del QTY_INPUT[user_id]
 
         await callback.message.answer(
@@ -801,15 +815,16 @@ async def cb_numpad(callback: CallbackQuery):
         await callback.answer()
         return
 
-    # обновляем текст с текущим значением
+    # --- обновляем текст numpad ---
     new_val = QTY_INPUT[user_id]["qty"] or "пусто"
+
     try:
         await callback.message.edit_text(
             f"Введите количество для `{article}`:\nТекущее: *{new_val}*",
             reply_markup=NUMPAD,
             parse_mode="Markdown",
         )
-    except Exception:
+    except:
         pass
 
     await callback.answer()
