@@ -120,12 +120,10 @@ NUMPAD = InlineKeyboardMarkup(
 # -------------------------------------------
 # ЗАГРУЗКА JSON С GitHub
 # -------------------------------------------
-def recognize_speech_vosk(wav_io):
-    wav_io.seek(0)
-
-    # записываем в temp wav, потому что wave.open требует файл
+def recognize_speech_vosk(wav_bytes: bytes):
+    # Сохраняем в реальный WAV-файл
     with open("temp_voice.wav", "wb") as f:
-        f.write(wav_io.read())
+        f.write(wav_bytes)
 
     wf = wave.open("temp_voice.wav", "rb")
 
@@ -139,11 +137,11 @@ def recognize_speech_vosk(wav_io):
         if len(data) == 0:
             break
         if rec.AcceptWaveform(data):
-            part = json.loads(rec.Result())
-            text += part.get("text", "") + " "
+            res = json.loads(rec.Result())
+            text += res.get("text", "") + " "
 
-    part = json.loads(rec.FinalResult())
-    text += part.get("text", "")
+    res = json.loads(rec.FinalResult())
+    text += res.get("text", "")
 
     return text.strip()
 def load_db() -> List[Dict[str, Any]]:
@@ -659,12 +657,8 @@ async def voice_handler(message: Message):
     # Конвертируем ogg → wav
     from pydub import AudioSegment
     audio = AudioSegment.from_file(io.BytesIO(ogg_bytes), format="ogg")
-    wav_io = io.BytesIO()
-    audio.export(wav_io, format="wav")
-    wav_io.seek(0)
-
-    # Распознаём
-    text = recognize_speech_vosk(wav_io)
+    wav_bytes = audio.export(format="wav").read()
+text = recognize_speech_vosk(wav_bytes)
 
     if not text:
         await message.answer("Не расслышал 🙈 Попробуйте ещё раз.")
