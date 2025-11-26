@@ -65,8 +65,8 @@ from reportlab.pdfbase.ttfonts import TTFont
 # user_id -> { article -> { name, price_opt(int), qty(int) } }
 USER_CARTS: Dict[int, Dict[str, Dict[str, Any]]] = {}
 
-# user_id -> article (ожидаем, что юзер введёт количество)
-PENDING_QTY: Dict[int, str] = {}
+# user_id -> {"article": str, "value": str}
+PENDING_QTY_INPUT: Dict[int, Dict[str, str]] = {}
 
 # article -> file_id (фото в телеге, чтобы слать мгновенно)
 PHOTO_CACHE: Dict[str, str] = {}
@@ -89,7 +89,34 @@ MAIN_MENU = ReplyKeyboardMarkup(
     resize_keyboard=True,
 )
 
+# -------------------------------------------
+# ЧИСЛОВАЯ КЛАВИАТУРА (NUMPAD)
+# -------------------------------------------
 
+NUMPAD = InlineKeyboardMarkup(
+    inline_keyboard=[
+        [
+            InlineKeyboardButton(text="1", callback_data="qty_digit_1"),
+            InlineKeyboardButton(text="2", callback_data="qty_digit_2"),
+            InlineKeyboardButton(text="3", callback_data="qty_digit_3"),
+        ],
+        [
+            InlineKeyboardButton(text="4", callback_data="qty_digit_4"),
+            InlineKeyboardButton(text="5", callback_data="qty_digit_5"),
+            InlineKeyboardButton(text="6", callback_data="qty_digit_6"),
+        ],
+        [
+            InlineKeyboardButton(text="7", callback_data="qty_digit_7"),
+            InlineKeyboardButton(text="8", callback_data="qty_digit_8"),
+            InlineKeyboardButton(text="9", callback_data="qty_digit_9"),
+        ],
+        [
+            InlineKeyboardButton(text="0", callback_data="qty_digit_0"),
+            InlineKeyboardButton(text="⌫", callback_data="qty_digit_back"),
+            InlineKeyboardButton(text="✔️ OK", callback_data="qty_digit_ok"),
+        ],
+    ]
+)
 # -------------------------------------------
 # ЗАГРУЗКА JSON С GitHub
 # -------------------------------------------
@@ -808,7 +835,89 @@ async def handle_message(message: Message):
     # иначе просто показываем карточку товара
     await send_product_card(message, product)
 
+# -------------------------------------------
+# NUMPAD — ВВОД КОЛИЧЕСТВА
+# -------------------------------------------
 
+# временное хранение: user_id -> {"article": "...", "qty": "12"}
+QTY_INPUT = {}
+
+
+@dp.callback_query(F.data.startswith("add_manual_"))
+async def cb_manual_qty(callback: CallbackQuery):
+    """Пользователь нажал '✏️ Ввести количество' — показываем numpad"""
+    user_id = callback.from_user.id
+    article = callback.data.replace("add_manual_", "")
+
+    QTY_INPUT[user_id] = {"article": article, "qty": ""}
+
+    await callback.message.answer(
+        f"Введите количество для `{article}`:",
+        reply_markup=NUMPAD,
+        parse_mode="Markdown"
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("qty_digit_"))
+async def cb_numpad(callback: CallbackQuery):
+    """Пользователь нажал цифру / backspace / OK"""
+    user_id = callback.from_user.id
+
+    if user_id not in QTY_INPUT:
+        await callback.answer()
+        return
+
+    action = callback.data.replace("qty_digit_", "")
+    current = QTY_INPUT[user_id]["qty"]
+
+    # цифры
+    if action.isdigit():
+        if len(current) < 4:            # ограничение 4 цифры, чтобы не было 99999
+            QTY_INPUT[user_id]["qty"] += action
+
+        await callback.answer()
+        await callback.message.edit_reply_markup(reply_markup=NUMPAD)
+        return
+
+    # backspace
+    if action == "back":
+        QTY_INPUT[user_id]["qty"] = current[:-1]
+        await callback.answer()
+        await callback.message.edit_reply_markup(reply_markup=NUMPAD)
+        return
+
+    # OK — подтверждение
+    if action == "ok":
+        qty_text = QTY_INPUT[user_id]["qty"]
+
+        if qty_text == "":
+            await callback.answer("Введите количество!", show_alert=True)
+            return
+
+        qty = int(qty_text)
+        article = QTY_INPUT[user_id]["article"]
+        product = get_product_by_article(article)
+
+        if not product:
+            await callback.answer("Товар не найден.", show_alert=True)
+            del QTY_INPUT[user_id]
+            return
+
+        if not add_to_cart(user_id, product, qty):
+            await callback.answer("Недостаточно на складе!", show_alert=True)
+            del QTY_INPUT[user_id]
+            return
+
+        del QTY_INPUT[user_id]
+
+        await callback.message.answer(
+            f"Добавлено {qty} шт товара *{product['name']}* (`{article}`)",
+            parse_mode="Markdown"
+        )
+
+        await send_cart(callback.message, user_id)
+        await callback.answer()
 # -------------------------------------------
 # CALLBACK: ОТКРЫТЬ КОРЗИНУ
 # -------------------------------------------
@@ -844,14 +953,17 @@ async def cb_add(callback: CallbackQuery):
 
     # --- Ручной ввод количества ---
     if data.startswith("add_manual_"):
-        article = data.replace("add_manual_", "", 1)
-        PENDING_QTY[user_id] = article
-        await callback.answer()
-        await callback.message.answer(
-            f"✏️ Введите количество для артикула `{article}`:",
-            parse_mode="Markdown",
-        )
-        return
+    article = data.replace("add_manual_", "")
+    PENDING_QTY_INPUT[user_id] = {"article": article, "value": ""}
+    
+    await callback.message.answer(
+        f"Введите количество для `{article}`:\n\n"
+        f"*Текущее значение:* (пусто)",
+        parse_mode="Markdown",
+        reply_markup=numpad_keyboard(article, "")
+    )
+    await callback.answer()
+    return
 
     # --- Быстрые кнопки ---
     m = re.match(r"^add_(\d+)_(.+)$", data)
