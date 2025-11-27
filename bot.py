@@ -766,8 +766,12 @@ async def voice_handler(message: Message):
     audio = audio.set_frame_rate(16000).set_channels(1)
 
     wav_io = io.BytesIO()
-    audio.export(wav_io, format="wav", parameters=["-ar", "16000"])
-    wav_bytes = wav_io.getvalue()
+audio.export(
+    wav_io,
+    format="wav",
+    parameters=["-ar", "16000", "-ac", "1", "-sample_fmt", "s16"]
+)
+wav_bytes = wav_io.getvalue()
 
     # 3. Проверка частоты
     try:
