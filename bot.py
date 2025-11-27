@@ -657,6 +657,7 @@ async def voice_handler(message: Message):
     # Конвертируем ogg → wav
     from pydub import AudioSegment
     audio = AudioSegment.from_file(io.BytesIO(ogg_bytes), format="ogg")
+    audio = audio.set_frame_rate(16000).set_channels(1)
     wav_bytes = audio.export(format="wav").read()
 
     # Распознаём
