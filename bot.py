@@ -120,15 +120,27 @@ NUMPAD = InlineKeyboardMarkup(
 # -------------------------------------------
 # ЗАГРУЗКА JSON С GitHub
 # -------------------------------------------
-def recognize_speech_vosk(wav_bytes: bytes):
-    # Сохраняем в реальный WAV-файл
-    with open("temp_voice.wav", "wb") as f:
-        f.write(wav_bytes)
+def recognize_speech_vosk(wav_bytes: bytes) -> str:
+    """
+    Стабильное распознавание через Vosk:
+    - тихий лог
+    - русский язык
+    - стабильный sample rate 16000
+    """
+    from vosk import Model, KaldiRecognizer, SetLogLevel
+    SetLogLevel(-1)
 
-    wf = wave.open("temp_voice.wav", "rb")
+    # Загружаем WAV
+    wf = wave.open(io.BytesIO(wav_bytes), "rb")
 
+    # Проверяем sample rate (должен быть 16000)
+    rate = wf.getframerate()
+    if rate != 16000:
+        print(f"[WARN] WAV sample rate = {rate}, ожидалось 16000!")
+
+    # Модель берём из папки "model"
     model = Model("model")
-    rec = KaldiRecognizer(model, wf.getframerate())
+    rec = KaldiRecognizer(model, 16000)
 
     text = ""
 
@@ -136,12 +148,14 @@ def recognize_speech_vosk(wav_bytes: bytes):
         data = wf.readframes(4000)
         if len(data) == 0:
             break
-        if rec.AcceptWaveform(data):
-            res = json.loads(rec.Result())
-            text += res.get("text", "") + " "
 
-    res = json.loads(rec.FinalResult())
-    text += res.get("text", "")
+        if rec.AcceptWaveform(data):
+            chunk = json.loads(rec.Result()).get("text", "")
+            if chunk:
+                text += chunk + " "
+
+    final = json.loads(rec.FinalResult()).get("text", "")
+    text += final
 
     return text.strip()
 def load_db() -> List[Dict[str, Any]]:
@@ -650,17 +664,31 @@ async def btn_upload_excel(message: Message):
 
 @dp.message(F.voice)
 async def voice_handler(message: Message):
-    # Скачиваем ogg-голос
+    user_id = message.from_user.id
+
+    # 1. Скачиваем OGG
     voice_file = await bot.download(message.voice.file_id)
     ogg_bytes = voice_file.read()
 
-    # Конвертируем ogg → wav
+    # 2. Конвертируем в WAV (жёстко 16000 Hz)
     from pydub import AudioSegment
+
     audio = AudioSegment.from_file(io.BytesIO(ogg_bytes), format="ogg")
     audio = audio.set_frame_rate(16000).set_channels(1)
-    wav_bytes = audio.export(format="wav").read()
 
-    # Распознаём
+    wav_io = io.BytesIO()
+    # ffmpeg принудительно выставляет частоту
+    audio.export(wav_io, format="wav", parameters=["-ar", "16000"])
+    wav_bytes = wav_io.getvalue()
+
+    # 3. ЛОГ: проверим частоту
+    try:
+        wf_test = wave.open(io.BytesIO(wav_bytes), "rb")
+        print(f"[DEBUG] WAV rate = {wf_test.getframerate()} Hz")
+    except:
+        print("[ERROR] Не удалось открыть экспортированный WAV")
+
+    # 4. Распознаём
     text = recognize_speech_vosk(wav_bytes)
 
     if not text:
@@ -669,14 +697,14 @@ async def voice_handler(message: Message):
 
     await message.answer(f"🎤 Вы сказали: *{text}*", parse_mode="Markdown")
 
-    # --- Пытаемся найти артикул ---
+    # 5. Пытаемся распознать товар / артикул
     article_query, qty = parse_article_and_qty(text)
     product = get_product_by_article(article_query)
 
     if product:
         return await send_product_card(message, product)
 
-    # --- Ищем по названию ---
+    # 6. Поиск по названию
     results = search_products_by_name(text)
 
     if not results:
