@@ -130,7 +130,7 @@ def recognize_speech_vosk(wav_bytes: bytes) -> str:
     wf = wave.open(io.BytesIO(wav_bytes), "rb")
 
     model = Model("model")
-    rec = KaldiRecognizer(model, 16000)
+    rec = KaldiRecognizer(model, wf.getframerate())
 
     text = ""
 
