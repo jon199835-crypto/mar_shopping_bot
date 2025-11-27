@@ -129,8 +129,12 @@ def recognize_speech_vosk(wav_bytes: bytes) -> str:
 
     wf = wave.open(io.BytesIO(wav_bytes), "rb")
 
+    rate = wf.getframerate()
+    if rate != 16000:
+        print(f"[WARN] WAV sample rate = {rate}, ожидалось 16000!")
+
     model = Model("model")
-    rec = KaldiRecognizer(model, wf.getframerate())
+    rec = KaldiRecognizer(model, 16000)
 
     text = ""
 
@@ -139,20 +143,24 @@ def recognize_speech_vosk(wav_bytes: bytes) -> str:
         if len(data) == 0:
             break
         if rec.AcceptWaveform(data):
-            part = json.loads(rec.Result()).get("text", "")
-            if part:
-                text += part + " "
+            chunk = json.loads(rec.Result()).get("text", "")
+            if chunk:
+                text += chunk + " "
 
     final = json.loads(rec.FinalResult()).get("text", "")
     text += final
 
     return text.strip()
 
-
 # -------------------------------------------
 # ПРЕОБРАЗОВАНИЕ СЛОВ → ЦИФРЫ ДЛЯ АРТИКУЛОВ
 # -------------------------------------------
 def words_to_article(text: str) -> str:
+    """
+    Аккуратно конвертирует русские числительные в цифры.
+    НЕ влияет на голосовое распознавание.
+    Поддерживает 'сорок три', 'пятьдесят два', 'восемьдесят один'.
+    """
     text = (
         text.lower()
         .replace("дефис", "-")
@@ -160,30 +168,19 @@ def words_to_article(text: str) -> str:
         .replace("минус", "-")
     )
 
-    # словарь чисел
     ones = {
         "ноль": 0, "нуль": 0,
         "один": 1, "раз": 1,
         "два": 2, "две": 2,
-        "три": 3,
-        "четыре": 4,
-        "пять": 5,
-        "шесть": 6,
-        "семь": 7,
-        "восемь": 8,
-        "девять": 9,
+        "три": 3, "четыре": 4,
+        "пять": 5, "шесть": 6, "семь": 7,
+        "восемь": 8, "девять": 9,
     }
 
     teens = {
-        "десять": 10,
-        "одиннадцать": 11,
-        "двенадцать": 12,
-        "тринадцать": 13,
-        "четырнадцать": 14,
-        "пятнадцать": 15,
-        "шестнадцать": 16,
-        "семнадцать": 17,
-        "восемнадцать": 18,
+        "десять": 10, "одиннадцать": 11, "двенадцать": 12,
+        "тринадцать": 13, "четырнадцать": 14, "пятнадцать": 15,
+        "шестнадцать": 16, "семнадцать": 17, "восемнадцать": 18,
         "девятнадцать": 19,
     }
 
@@ -199,7 +196,7 @@ def words_to_article(text: str) -> str:
     }
 
     words = text.split()
-    parts = []
+    result = []
     i = 0
 
     while i < len(words):
@@ -207,47 +204,44 @@ def words_to_article(text: str) -> str:
 
         # дефис
         if w == "-":
-            parts.append("-")
+            result.append("-")
             i += 1
             continue
 
         # готовые числа
         if w.isdigit():
-            parts.append(w)
-            i += 1
-            continue
-
-        # 0–9
-        if w in ones:
-            parts.append(str(ones[w]))
+            result.append(w)
             i += 1
             continue
 
         # 10–19
         if w in teens:
-            parts.append(str(teens[w]))
+            result.append(str(teens[w]))
             i += 1
             continue
 
         # десятки
         if w in tens:
-            val = tens[w]
-
-            # если дальше идёт единица (сорок три)
-            if i + 1 < len(words) and words[i + 1] in ones:
-                parts.append(str(val + ones[words[i + 1]]))
+            base = tens[w]
+            # например: "семьдесят три"
+            if i + 1 < len(words) and words[i+1] in ones:
+                result.append(str(base + ones[words[i+1]]))
                 i += 2
                 continue
-
-            # просто десяток
-            parts.append(str(val))
+            result.append(str(base))
             i += 1
             continue
 
-        # всё остальное игнорируем
+        # 0–9
+        if w in ones:
+            result.append(str(ones[w]))
+            i += 1
+            continue
+
+        # если слово не число — пропускаем
         i += 1
 
-    return "".join(parts)
+    return "".join(result)
 
     
 def load_db() -> List[Dict[str, Any]]:
@@ -759,17 +753,30 @@ async def btn_upload_excel(message: Message):
 # -------------------------------------------
 @dp.message(F.voice)
 async def voice_handler(message: Message):
-    # 1. Скачиваем голос
+    user_id = message.from_user.id
+
+    # 1. Скачиваем OGG
     voice_file = await bot.download(message.voice.file_id)
     ogg_bytes = voice_file.read()
 
-    # 2. Конвертируем OGG → WAV (16kHz, mono)
+    # 2. Конвертируем в WAV (16000 Hz)
     from pydub import AudioSegment
+
     audio = AudioSegment.from_file(io.BytesIO(ogg_bytes), format="ogg")
     audio = audio.set_frame_rate(16000).set_channels(1)
-    wav_bytes = audio.export(format="wav").read()
 
-    # 3. Распознаем через Vosk
+    wav_io = io.BytesIO()
+    audio.export(wav_io, format="wav", parameters=["-ar", "16000"])
+    wav_bytes = wav_io.getvalue()
+
+    # 3. Проверка частоты
+    try:
+        wf_test = wave.open(io.BytesIO(wav_bytes), "rb")
+        print(f"[DEBUG] WAV rate = {wf_test.getframerate()} Hz")
+    except:
+        print("[ERROR] Не удалось открыть WAV")
+
+    # 4. Распознаём
     text = recognize_speech_vosk(wav_bytes)
 
     if not text:
@@ -778,25 +785,31 @@ async def voice_handler(message: Message):
 
     await message.answer(f"🎤 Вы сказали: *{text}*", parse_mode="Markdown")
 
-    # --- попробуем расшифровать как артикул ---
-    possible_article = words_to_article(text)
+    # --- преобразование слов → цифр ---
+    article_text = words_to_article(text)
 
-    if possible_article:
-        product = get_product_by_article(possible_article)
-        if product:
-            return await send_product_card(message, product)
+    # 5. Пытаемся распознать артикул
+    article_query, qty = parse_article_and_qty(article_text)
+    product = get_product_by_article(article_query)
 
-    # --- иначе поиск по названию ---
+    if product:
+        return await send_product_card(message, product)
+
+    # 6. Иначе ищем по названию
     results = search_products_by_name(text)
 
     if not results:
-        await message.answer("❌ Ничего не найдено по запросу.")
+        await message.answer("❌ Ничего не найдено по вашему запросу.")
         return
 
     if len(results) == 1:
         return await send_product_card(message, results[0])
 
-    await message.answer(f"🔎 Найдено {len(results)} позиций:")
+    await message.answer(
+        f"🔎 Найдено {len(results)} позиций, показываю первые 10:",
+        parse_mode="Markdown",
+    )
+
     for p in results[:10]:
         await send_product_card(message, p)
 # -------------------------------------------
