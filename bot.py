@@ -129,7 +129,7 @@ def recognize_speech_vosk(wav_bytes: bytes) -> str:
 
     wf = wave.open(io.BytesIO(wav_bytes), "rb")
 
-    model = Model("model")                 # папка модель должна называться model
+    model = Model("model")
     rec = KaldiRecognizer(model, 16000)
 
     text = ""
@@ -160,8 +160,8 @@ def words_to_article(text: str) -> str:
         .replace("минус", "-")
     )
 
-    numbers = {
-        # 0–19
+    # словарь чисел
+    ones = {
         "ноль": 0, "нуль": 0,
         "один": 1, "раз": 1,
         "два": 2, "две": 2,
@@ -172,6 +172,9 @@ def words_to_article(text: str) -> str:
         "семь": 7,
         "восемь": 8,
         "девять": 9,
+    }
+
+    teens = {
         "десять": 10,
         "одиннадцать": 11,
         "двенадцать": 12,
@@ -182,8 +185,9 @@ def words_to_article(text: str) -> str:
         "семнадцать": 17,
         "восемнадцать": 18,
         "девятнадцать": 19,
+    }
 
-        # десятки
+    tens = {
         "двадцать": 20,
         "тридцать": 30,
         "сорок": 40,
@@ -194,58 +198,53 @@ def words_to_article(text: str) -> str:
         "девяносто": 90,
     }
 
-    # единицы (для склейки с десятками)
-    unit_words = {
-        "ноль", "нуль",
-        "один", "раз",
-        "два", "две",
-        "три",
-        "четыре",
-        "пять",
-        "шесть",
-        "семь",
-        "восемь",
-        "девять",
-    }
-
     words = text.split()
-    parts: List[str] = []
+    parts = []
     i = 0
 
     while i < len(words):
         w = words[i]
 
-        # дефис как разделитель
+        # дефис
         if w == "-":
             parts.append("-")
             i += 1
             continue
 
-        # если слово — число
-        if w in numbers:
-            val = numbers[w]
-
-            # если это десятки и дальше идёт единица — склеиваем (сорок три → 43)
-            if 20 <= val <= 90 and i + 1 < len(words):
-                next_w = words[i + 1]
-                if next_w in numbers and next_w in unit_words:
-                    val2 = numbers[next_w]
-                    parts.append(str(val + val2))
-                    i += 2
-                    continue
-
-            # иначе просто добавляем как есть
-            parts.append(str(val))
-            i += 1
-            continue
-
-        # если готовое число (на всякий)
+        # готовые числа
         if w.isdigit():
             parts.append(w)
             i += 1
             continue
 
-        # всё остальное игнорируем (слова типа "артикул", "номер", и т.п.)
+        # 0–9
+        if w in ones:
+            parts.append(str(ones[w]))
+            i += 1
+            continue
+
+        # 10–19
+        if w in teens:
+            parts.append(str(teens[w]))
+            i += 1
+            continue
+
+        # десятки
+        if w in tens:
+            val = tens[w]
+
+            # если дальше идёт единица (сорок три)
+            if i + 1 < len(words) and words[i + 1] in ones:
+                parts.append(str(val + ones[words[i + 1]]))
+                i += 2
+                continue
+
+            # просто десяток
+            parts.append(str(val))
+            i += 1
+            continue
+
+        # всё остальное игнорируем
         i += 1
 
     return "".join(parts)
@@ -760,18 +759,17 @@ async def btn_upload_excel(message: Message):
 # -------------------------------------------
 @dp.message(F.voice)
 async def voice_handler(message: Message):
-
     # 1. Скачиваем голос
     voice_file = await bot.download(message.voice.file_id)
     ogg_bytes = voice_file.read()
 
-    # 2. Конвертируем в WAV 16 kHz
+    # 2. Конвертируем OGG → WAV (16kHz, mono)
     from pydub import AudioSegment
     audio = AudioSegment.from_file(io.BytesIO(ogg_bytes), format="ogg")
     audio = audio.set_frame_rate(16000).set_channels(1)
     wav_bytes = audio.export(format="wav").read()
 
-    # 3. Распознаём речь
+    # 3. Распознаем через Vosk
     text = recognize_speech_vosk(wav_bytes)
 
     if not text:
@@ -780,16 +778,15 @@ async def voice_handler(message: Message):
 
     await message.answer(f"🎤 Вы сказали: *{text}*", parse_mode="Markdown")
 
-    # 4. Пробуем преобразовать волосы → артикул
+    # --- попробуем расшифровать как артикул ---
     possible_article = words_to_article(text)
 
-    # Если получилось, ищем по артикулу
     if possible_article:
         product = get_product_by_article(possible_article)
         if product:
             return await send_product_card(message, product)
 
-    # 5. Иначе — поиск по названию
+    # --- иначе поиск по названию ---
     results = search_products_by_name(text)
 
     if not results:
@@ -799,7 +796,7 @@ async def voice_handler(message: Message):
     if len(results) == 1:
         return await send_product_card(message, results[0])
 
-    await message.answer(f"🔎 Найдено {len(results)} позиций:", parse_mode="Markdown")
+    await message.answer(f"🔎 Найдено {len(results)} позиций:")
     for p in results[:10]:
         await send_product_card(message, p)
 # -------------------------------------------
