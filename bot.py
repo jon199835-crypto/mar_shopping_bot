@@ -120,26 +120,16 @@ NUMPAD = InlineKeyboardMarkup(
 # -------------------------------------------
 # ЗАГРУЗКА JSON С GitHub
 # -------------------------------------------
+# -------------------------------------------
+# РАСПОЗНАВАНИЕ РЕЧИ VOSK (СТАБИЛЬНОЕ)
+# -------------------------------------------
 def recognize_speech_vosk(wav_bytes: bytes) -> str:
-    """
-    Стабильное распознавание через Vosk:
-    - тихий лог
-    - русский язык
-    - стабильный sample rate 16000
-    """
     from vosk import Model, KaldiRecognizer, SetLogLevel
     SetLogLevel(-1)
 
-    # Загружаем WAV
     wf = wave.open(io.BytesIO(wav_bytes), "rb")
 
-    # Проверяем sample rate (должен быть 16000)
-    rate = wf.getframerate()
-    if rate != 16000:
-        print(f"[WARN] WAV sample rate = {rate}, ожидалось 16000!")
-
-    # Модель берём из папки "model"
-    model = Model("model")
+    model = Model("model")                 # папка модель должна называться model
     rec = KaldiRecognizer(model, 16000)
 
     text = ""
@@ -148,36 +138,30 @@ def recognize_speech_vosk(wav_bytes: bytes) -> str:
         data = wf.readframes(4000)
         if len(data) == 0:
             break
-
         if rec.AcceptWaveform(data):
-            chunk = json.loads(rec.Result()).get("text", "")
-            if chunk:
-                text += chunk + " "
+            part = json.loads(rec.Result()).get("text", "")
+            if part:
+                text += part + " "
 
     final = json.loads(rec.FinalResult()).get("text", "")
     text += final
 
     return text.strip()
 
-# -------------------------------------------
-# ГОЛОСОВОЙ ПОИСК (VOSK)
-# -------------------------------------------
 
-# Мощный конвертер речи → артикул
+# -------------------------------------------
+# ПРЕОБРАЗОВАНИЕ СЛОВ → ЦИФРЫ ДЛЯ АРТИКУЛОВ
+# -------------------------------------------
 def words_to_article(text: str) -> str:
-    text = text.lower().strip()
-
-    # заменяем служебные слова
     text = (
-        text.replace("дефис", "-")
-            .replace("тире", "-")
-            .replace("минус", "-")
-            .replace("точка", ".")
+        text.lower()
+        .replace("дефис", "-")
+        .replace("тире", "-")
+        .replace("минус", "-")
     )
 
-    # словарь чисел
-    num_words = {
-        # 0–9
+    numbers = {
+        # 0–19
         "ноль": 0, "нуль": 0,
         "один": 1, "раз": 1,
         "два": 2, "две": 2,
@@ -188,8 +172,6 @@ def words_to_article(text: str) -> str:
         "семь": 7,
         "восемь": 8,
         "девять": 9,
-
-        # 10–19
         "десять": 10,
         "одиннадцать": 11,
         "двенадцать": 12,
@@ -210,81 +192,63 @@ def words_to_article(text: str) -> str:
         "семьдесят": 70,
         "восемьдесят": 80,
         "девяносто": 90,
+    }
 
-        # сотни
-        "сто": 100,
-        "двести": 200,
-        "триста": 300,
-        "четыреста": 400,
-        "пятьсот": 500,
-        "шестьсот": 600,
-        "семьсот": 700,
-        "восемьсот": 800,
-        "девятьсот": 900,
-
-        # тысячи
-        "тысяча": 1000,
+    # единицы (для склейки с десятками)
+    unit_words = {
+        "ноль", "нуль",
+        "один", "раз",
+        "два", "две",
+        "три",
+        "четыре",
+        "пять",
+        "шесть",
+        "семь",
+        "восемь",
+        "девять",
     }
 
     words = text.split()
-    result = []
-    current_num = 0
+    parts: List[str] = []
+    i = 0
 
-    for w in words:
-        # если это "-" оставляем как разделитель
+    while i < len(words):
+        w = words[i]
+
+        # дефис как разделитель
         if w == "-":
-            if current_num > 0:
-                result.append(str(current_num))
-                current_num = 0
-            result.append("-")
+            parts.append("-")
+            i += 1
             continue
 
-        # если слово — цифра сразу
+        # если слово — число
+        if w in numbers:
+            val = numbers[w]
+
+            # если это десятки и дальше идёт единица — склеиваем (сорок три → 43)
+            if 20 <= val <= 90 and i + 1 < len(words):
+                next_w = words[i + 1]
+                if next_w in numbers and next_w in unit_words:
+                    val2 = numbers[next_w]
+                    parts.append(str(val + val2))
+                    i += 2
+                    continue
+
+            # иначе просто добавляем как есть
+            parts.append(str(val))
+            i += 1
+            continue
+
+        # если готовое число (на всякий)
         if w.isdigit():
-            if current_num > 0:
-                result.append(str(current_num))
-                current_num = 0
-            result.append(w)
+            parts.append(w)
+            i += 1
             continue
 
-        # если слово — число из словаря
-        if w in num_words:
-            value = num_words[w]
+        # всё остальное игнорируем (слова типа "артикул", "номер", и т.п.)
+        i += 1
 
-            # если это тысячи — сразу закрываем блок
-            if value == 1000:
-                current_num += value
-                result.append(str(current_num))
-                current_num = 0
-                continue
-
-            # если сотни / десятки — копим
-            if value >= 100:
-                current_num += value
-                continue
-
-            # если 20–90 — тоже копим
-            if 20 <= value <= 90:
-                current_num += value
-                continue
-
-            # если 0–19 и уже есть числа — складываем
-            if current_num > 0:
-                current_num += value
-                continue
-
-            # иначе добавляем как отдельную цифру
-            result.append(str(value))
-            continue
-
-    # добиваем хвост
-    if current_num > 0:
-        result.append(str(current_num))
-
-    # склеиваем в артикул
-    article = "".join(result)
-
-    return article
+    return "".join(parts)
 
     
 def load_db() -> List[Dict[str, Any]]:
@@ -791,6 +755,9 @@ async def btn_upload_excel(message: Message):
         parse_mode="Markdown",
     )
 
+# -------------------------------------------
+# ГОЛОСОВОЙ ПОИСК (СТАРАЯ РАБОЧАЯ ЛОГИКА + ЧИСЛА)
+# -------------------------------------------
 @dp.message(F.voice)
 async def voice_handler(message: Message):
 
@@ -798,47 +765,41 @@ async def voice_handler(message: Message):
     voice_file = await bot.download(message.voice.file_id)
     ogg_bytes = voice_file.read()
 
-    # 2. Конвертируем в WAV 16 kHz 1-channel
+    # 2. Конвертируем в WAV 16 kHz
     from pydub import AudioSegment
     audio = AudioSegment.from_file(io.BytesIO(ogg_bytes), format="ogg")
     audio = audio.set_frame_rate(16000).set_channels(1)
     wav_bytes = audio.export(format="wav").read()
 
-    # 3. Распознаем через Vosk
+    # 3. Распознаём речь
     text = recognize_speech_vosk(wav_bytes)
 
     if not text:
         await message.answer("Не расслышал 🙈 Попробуйте ещё раз.")
         return
 
-    await message.answer(f"🎤 Распознал: *{text}*", parse_mode="Markdown")
+    await message.answer(f"🎤 Вы сказали: *{text}*", parse_mode="Markdown")
 
-    # 4. Преобразуем речь в артикул
-    article_from_speech = words_to_article(text)
+    # 4. Пробуем преобразовать волосы → артикул
+    possible_article = words_to_article(text)
 
-    if article_from_speech:
-        await message.answer(f"🔧 Я понял артикул как: `{article_from_speech}`", parse_mode="Markdown")
-
-        # пробуем найти
-        product = get_product_by_article(article_from_speech)
+    # Если получилось, ищем по артикулу
+    if possible_article:
+        product = get_product_by_article(possible_article)
         if product:
             return await send_product_card(message, product)
 
-    # 5. Если не артикул — пробуем поиск по названию
+    # 5. Иначе — поиск по названию
     results = search_products_by_name(text)
 
     if not results:
-        await message.answer("❌ Ничего не найдено. Попробуйте сказать медленнее.")
+        await message.answer("❌ Ничего не найдено по запросу.")
         return
 
     if len(results) == 1:
         return await send_product_card(message, results[0])
 
-    await message.answer(
-        f"🔎 Найдено {len(results)} товаров. Покажу первые 10:",
-        parse_mode="Markdown"
-    )
-
+    await message.answer(f"🔎 Найдено {len(results)} позиций:", parse_mode="Markdown")
     for p in results[:10]:
         await send_product_card(message, p)
 # -------------------------------------------
