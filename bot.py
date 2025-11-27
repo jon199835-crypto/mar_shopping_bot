@@ -158,6 +158,135 @@ def recognize_speech_vosk(wav_bytes: bytes) -> str:
     text += final
 
     return text.strip()
+
+# -------------------------------------------
+# ГОЛОСОВОЙ ПОИСК (VOSK)
+# -------------------------------------------
+
+# Мощный конвертер речи → артикул
+def words_to_article(text: str) -> str:
+    text = text.lower().strip()
+
+    # заменяем служебные слова
+    text = (
+        text.replace("дефис", "-")
+            .replace("тире", "-")
+            .replace("минус", "-")
+            .replace("точка", ".")
+    )
+
+    # словарь чисел
+    num_words = {
+        # 0–9
+        "ноль": 0, "нуль": 0,
+        "один": 1, "раз": 1,
+        "два": 2, "две": 2,
+        "три": 3,
+        "четыре": 4,
+        "пять": 5,
+        "шесть": 6,
+        "семь": 7,
+        "восемь": 8,
+        "девять": 9,
+
+        # 10–19
+        "десять": 10,
+        "одиннадцать": 11,
+        "двенадцать": 12,
+        "тринадцать": 13,
+        "четырнадцать": 14,
+        "пятнадцать": 15,
+        "шестнадцать": 16,
+        "семнадцать": 17,
+        "восемнадцать": 18,
+        "девятнадцать": 19,
+
+        # десятки
+        "двадцать": 20,
+        "тридцать": 30,
+        "сорок": 40,
+        "пятьдесят": 50,
+        "шестьдесят": 60,
+        "семьдесят": 70,
+        "восемьдесят": 80,
+        "девяносто": 90,
+
+        # сотни
+        "сто": 100,
+        "двести": 200,
+        "триста": 300,
+        "четыреста": 400,
+        "пятьсот": 500,
+        "шестьсот": 600,
+        "семьсот": 700,
+        "восемьсот": 800,
+        "девятьсот": 900,
+
+        # тысячи
+        "тысяча": 1000,
+    }
+
+    words = text.split()
+    result = []
+    current_num = 0
+
+    for w in words:
+        # если это "-" оставляем как разделитель
+        if w == "-":
+            if current_num > 0:
+                result.append(str(current_num))
+                current_num = 0
+            result.append("-")
+            continue
+
+        # если слово — цифра сразу
+        if w.isdigit():
+            if current_num > 0:
+                result.append(str(current_num))
+                current_num = 0
+            result.append(w)
+            continue
+
+        # если слово — число из словаря
+        if w in num_words:
+            value = num_words[w]
+
+            # если это тысячи — сразу закрываем блок
+            if value == 1000:
+                current_num += value
+                result.append(str(current_num))
+                current_num = 0
+                continue
+
+            # если сотни / десятки — копим
+            if value >= 100:
+                current_num += value
+                continue
+
+            # если 20–90 — тоже копим
+            if 20 <= value <= 90:
+                current_num += value
+                continue
+
+            # если 0–19 и уже есть числа — складываем
+            if current_num > 0:
+                current_num += value
+                continue
+
+            # иначе добавляем как отдельную цифру
+            result.append(str(value))
+            continue
+
+    # добиваем хвост
+    if current_num > 0:
+        result.append(str(current_num))
+
+    # склеиваем в артикул
+    article = "".join(result)
+
+    return article
+
+    
 def load_db() -> List[Dict[str, Any]]:
     """
     Кэшируем products.json на 60 секунд.
@@ -664,58 +793,49 @@ async def btn_upload_excel(message: Message):
 
 @dp.message(F.voice)
 async def voice_handler(message: Message):
-    user_id = message.from_user.id
 
-    # 1. Скачиваем OGG
+    # 1. Скачиваем голос
     voice_file = await bot.download(message.voice.file_id)
     ogg_bytes = voice_file.read()
 
-    # 2. Конвертируем в WAV (жёстко 16000 Hz)
+    # 2. Конвертируем в WAV 16 kHz 1-channel
     from pydub import AudioSegment
-
     audio = AudioSegment.from_file(io.BytesIO(ogg_bytes), format="ogg")
     audio = audio.set_frame_rate(16000).set_channels(1)
+    wav_bytes = audio.export(format="wav").read()
 
-    wav_io = io.BytesIO()
-    # ffmpeg принудительно выставляет частоту
-    audio.export(wav_io, format="wav", parameters=["-ar", "16000"])
-    wav_bytes = wav_io.getvalue()
-
-    # 3. ЛОГ: проверим частоту
-    try:
-        wf_test = wave.open(io.BytesIO(wav_bytes), "rb")
-        print(f"[DEBUG] WAV rate = {wf_test.getframerate()} Hz")
-    except:
-        print("[ERROR] Не удалось открыть экспортированный WAV")
-
-    # 4. Распознаём
+    # 3. Распознаем через Vosk
     text = recognize_speech_vosk(wav_bytes)
 
     if not text:
         await message.answer("Не расслышал 🙈 Попробуйте ещё раз.")
         return
 
-    await message.answer(f"🎤 Вы сказали: *{text}*", parse_mode="Markdown")
+    await message.answer(f"🎤 Распознал: *{text}*", parse_mode="Markdown")
 
-    # 5. Пытаемся распознать товар / артикул
-    article_query, qty = parse_article_and_qty(text)
-    product = get_product_by_article(article_query)
+    # 4. Преобразуем речь в артикул
+    article_from_speech = words_to_article(text)
 
-    if product:
-        return await send_product_card(message, product)
+    if article_from_speech:
+        await message.answer(f"🔧 Я понял артикул как: `{article_from_speech}`", parse_mode="Markdown")
 
-    # 6. Поиск по названию
+        # пробуем найти
+        product = get_product_by_article(article_from_speech)
+        if product:
+            return await send_product_card(message, product)
+
+    # 5. Если не артикул — пробуем поиск по названию
     results = search_products_by_name(text)
 
     if not results:
-        await message.answer("❌ Ничего не найдено по вашему запросу.")
+        await message.answer("❌ Ничего не найдено. Попробуйте сказать медленнее.")
         return
 
     if len(results) == 1:
         return await send_product_card(message, results[0])
 
     await message.answer(
-        f"🔎 Найдено {len(results)} позиций, показываю первые 10:",
+        f"🔎 Найдено {len(results)} товаров. Покажу первые 10:",
         parse_mode="Markdown"
     )
 
