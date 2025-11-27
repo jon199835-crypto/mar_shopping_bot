@@ -243,7 +243,7 @@ def words_to_article(text: str) -> str:
 
     return "".join(result)
     
-    def words_to_latin_letters(text: str) -> str:
+def words_to_latin_letters(text: str) -> str:
     """
     Преобразует русские названия букв в латинские эквиваленты.
     Примеры:
